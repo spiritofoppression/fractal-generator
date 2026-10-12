@@ -1,266 +1,260 @@
 import numpy as np
-from PIL import Image
 import random
-import math
+import json
+from PIL import Image
 
+# ==============================================================================
+# СИМВОЛЬНЫЕ ДЕРЕВЬЯ ВЫРАЖЕНИЙ
+# ==============================================================================
+
+class ExprNode:
+    def evaluate(self, z):
+        raise NotImplementedError
+    def to_dict(self):
+        raise NotImplementedError
+
+class Var(ExprNode):
+    def evaluate(self, z):
+        return z
+    def to_dict(self):
+        return {"type": "Var"}
+
+class Const(ExprNode):
+    def __init__(self):
+        self.value = complex(random.uniform(-1, 1), random.uniform(-1, 1))
+    def evaluate(self, z):
+        return np.full_like(z, self.value)
+    def to_dict(self):
+        return {"type": "Const", "re": self.value.real, "im": self.value.imag}
+
+class UnaryOp(ExprNode):
+    OPERATORS = ['sin', 'cos', 'tan', 'sinh', 'tanh', 
+                 'square', 'cube', 'sqrt', 'inverse', 'exp']
+    
+    def __init__(self, child):
+        self.op = random.choice(self.OPERATORS)
+        self.child = child
+        
+    def evaluate(self, z):
+        val = self.child.evaluate(z)
+        with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+            # Ограничиваем вход для нестабильных функций
+            if self.op in ['exp', 'sinh']:
+                val = np.clip(val, -3, 3)
+            elif self.op in ['tan']:
+                val = np.clip(val, -1.5, 1.5)
+            
+            if self.op == 'sin': res = np.sin(val)
+            elif self.op == 'cos': res = np.cos(val)
+            elif self.op == 'tan': res = np.tan(val)
+            elif self.op == 'sinh': res = np.sinh(val)
+            elif self.op == 'tanh': res = np.tanh(val)
+            elif self.op == 'square': res = val ** 2
+            elif self.op == 'cube': res = val ** 3
+            elif self.op == 'sqrt': 
+                # Правильный sqrt для комплексных чисел без разрывов
+                res = np.sqrt(np.abs(val) + 1e-6) * np.exp(0.5j * np.angle(val))
+            elif self.op == 'inverse': res = 1.0 / (val + 1e-6)
+            elif self.op == 'exp': res = np.exp(val)
+            else: res = val
+            
+        # Плавное ограничение вместо жёсткого clip
+        # tanh сжимает большие значения, но без резких границ
+        res = np.tanh(res / 5.0) * 5.0
+        return np.nan_to_num(res, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def to_dict(self):
+        return {"type": "UnaryOp", "op": self.op, "child": self.child.to_dict()}
+
+class BinaryOp(ExprNode):
+    OPERATORS = ['add', 'sub', 'mul', 'div', 'power']
+    
+    def __init__(self, left, right):
+        self.op = random.choice(self.OPERATORS)
+        self.left = left
+        self.right = right
+        
+    def evaluate(self, z):
+        l_val = self.left.evaluate(z)
+        r_val = self.right.evaluate(z)
+        with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+            if self.op == 'add': res = l_val + r_val
+            elif self.op == 'sub': res = l_val - r_val
+            elif self.op == 'mul': res = l_val * r_val
+            elif self.op == 'div': res = l_val / (r_val + 1e-6)
+            elif self.op == 'power':
+                r_clipped = np.clip(r_val, -1.5, 1.5)
+                res = np.exp(r_clipped * np.log(np.abs(l_val) + 1e-6) + 1j * np.angle(l_val))
+            else: res = l_val
+        
+        # Плавное ограничение
+        res = np.tanh(res / 5.0) * 5.0
+        return np.nan_to_num(res, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def to_dict(self):
+        return {"type": "BinaryOp", "op": self.op, 
+                "left": self.left.to_dict(), "right": self.right.to_dict()}
+
+def generate_random_function(max_depth=4):
+    def _generate(depth):
+        if depth >= max_depth:
+            return Var() if random.random() > 0.3 else Const()
+        
+        choice = random.random()
+        if choice < 0.25:
+            return Var()
+        elif choice < 0.35:
+            return Const()
+        elif choice < 0.70:
+            return UnaryOp(_generate(depth + 1))
+        else:
+            return BinaryOp(_generate(depth + 1), _generate(depth + 1))
+    
+    return _generate(0)
+
+def build_tree_from_dict(d):
+    t = d['type']
+    if t == 'Const':
+        node = Const()
+        node.value = complex(d['re'], d['im'])
+        return node
+    elif t == 'Var':
+        return Var()
+    elif t == 'UnaryOp':
+        return UnaryOp(build_tree_from_dict(d['child']))
+    elif t == 'BinaryOp':
+        return BinaryOp(build_tree_from_dict(d['left']), build_tree_from_dict(d['right']))
+    return Var()
+
+# ==============================================================================
+# ГЕНЕРАТОР FRACTAL FLAME
+# ==============================================================================
 
 def generate_fractal_flame(
-    width=4096,
-    height=4096,
-    num_transforms=5,
-    num_points=1000000,
-    variations=None,
-    color_palette=None,
-    gamma=2.5,
-    brightness=1.0,
-    background_color=(0, 0, 0),
-    zoom=1.0,
-    center_x=None,
-    center_y=None
+    width=1024, 
+    height=1024, 
+    num_points=500000, 
+    iterations=5,        # Увеличили с 2 до 5
+    burn_in=3,           # Новый параметр: итерации "прогрева"
+    num_transforms=4, 
+    max_depth=4, 
+    zoom=1.0, 
+    center_x=0.0, 
+    center_y=0.0,
+    transforms_json=None
 ):
-    """
-    Генерирует fractal flame
-    
-    variations: список названий вариаций для каждого преобразования
-    color_palette: список из 256 цветов (RGB кортежи)
-    gamma: гамма-коррекция для логарифмического масштабирования
-    brightness: общая яркость изображения
-    """
-    # Если вариации не заданы, генерируем случайные
-    if variations is None:
-        variations = _generate_random_variations(num_transforms)
-    
-    # Если палитра не задана, генерируем случайную
-    if color_palette is None:
-        color_palette = _generate_random_palette()
-    
-    # Генерируем аффинные преобразования
-    transforms = _generate_affine_transforms(num_transforms)
-    
-    # Инициализируем аккумуляторы для цвета и плотности
-    color_accum = np.zeros((height, width, 3), dtype=np.float64)
-    density_accum = np.zeros((height, width), dtype=np.float64)
-    
-    # Начальная точка
-    x, y = 0.0, 0.0
-    current_color = 0.0
-    
-    # Пропускаем первые 20 итераций
-    for _ in range(20):
-        transform_idx = random.randint(0, num_transforms - 1)
-        a, b, c, d, e, f = transforms[transform_idx]
-        x_new = a * x + b * y + e
-        y_new = c * x + d * y + f
-        
-        # Применяем вариацию
-        var_func = _get_variation_function(variations[transform_idx])
-        x_new, y_new = var_func(x_new, y_new)
-        
-        x, y = x_new, y_new
-        current_color = (current_color + 1.0 / num_transforms) % 1.0
-    
-    # Генерируем точки
-    for i in range(num_points):
-        transform_idx = random.randint(0, num_transforms - 1)
-        a, b, c, d, e, f = transforms[transform_idx]
-        
-        # Аффинное преобразование
-        x_new = a * x + b * y + e
-        y_new = c * x + d * y + f
-        
-        # Применяем вариацию
-        var_func = _get_variation_function(variations[transform_idx])
-        x_new, y_new = var_func(x_new, y_new)
-        
-        x, y = x_new, y_new
-        current_color = (current_color + 1.0 / num_transforms) % 1.0
-        
-        # Преобразуем в пиксельные координаты
-        px, py = _world_to_pixel(x, y, width, height, zoom, center_x, center_y)
-        
-        # Если точка в пределах изображения
-        if 0 <= px < width and 0 <= py < height:
-            # Получаем цвет из палитры
-            color_idx = int(current_color * 255)
-            r, g, b = color_palette[color_idx]
-            
-            # Добавляем в аккумуляторы
-            color_accum[py, px, 0] += r
-            color_accum[py, px, 1] += g
-            color_accum[py, px, 2] += b
-            density_accum[py, px] += 1
-    
-    # Применяем логарифмическое масштабирование и гамма-коррекцию
-    img_array = _apply_log_scaling(color_accum, density_accum, gamma, brightness)
-    
-    return Image.fromarray(img_array)
-
-
-def _generate_affine_transforms(num_transforms):
-    """Генерирует случайные аффинные преобразования"""
     transforms = []
-    for _ in range(num_transforms):
-        angle = random.uniform(0, 2 * math.pi)
-        scale = random.uniform(0.3, 0.7)
-        cos_a = math.cos(angle)
-        sin_a = math.sin(angle)
-        
-        a = scale * cos_a
-        b = -scale * sin_a
-        c = scale * sin_a
-        d = scale * cos_a
-        e = random.uniform(-1.0, 1.0)
-        f = random.uniform(-1.0, 1.0)
-        
-        transforms.append((a, b, c, d, e, f))
-    
-    return transforms
-
-
-def _generate_random_variations(num_transforms):
-    """Генерирует случайные вариации для каждого преобразования"""
-    variation_names = [
-        'linear', 'sinusoidal', 'spherical', 'swirl',
-        'horseshoe', 'heart', 'disc', 'spiral',
-        'hyperbolic', 'diamond', 'ex', 'julian'
-    ]
-    return [random.choice(variation_names) for _ in range(num_transforms)]
-
-
-def _get_variation_function(variation_name):
-    """Возвращает функцию вариации по имени"""
-    if variation_name == 'linear':
-        return lambda x, y: (x, y)
-    elif variation_name == 'sinusoidal':
-        return lambda x, y: (math.sin(x), math.sin(y))
-    elif variation_name == 'spherical':
-        return lambda x, y: (x / (x*x + y*y + 1e-10), y / (x*x + y*y + 1e-10))
-    elif variation_name == 'swirl':
-        def swirl(x, y):
-            r2 = x*x + y*y
-            return (x * math.sin(r2) - y * math.cos(r2),
-                    x * math.cos(r2) + y * math.sin(r2))
-        return swirl
-    elif variation_name == 'horseshoe':
-        def horseshoe(x, y):
-            r = math.sqrt(x*x + y*y + 1e-10)
-            return ((x*x - y*y) / r, 2*x*y / r)
-        return horseshoe
-    elif variation_name == 'heart':
-        def heart(x, y):
-            r = math.sqrt(x*x + y*y + 1e-10)
-            return (r * math.sin(x * r), -r * math.cos(y * r))
-        return heart
-    elif variation_name == 'disc':
-        def disc(x, y):
-            r = math.pi * math.sqrt(x*x + y*y + 1e-10)
-            return (x / r * math.sin(math.pi * r),
-                    y / r * math.cos(math.pi * r))
-        return disc
-    elif variation_name == 'spiral':
-        def spiral(x, y):
-            r = math.sqrt(x*x + y*y + 1e-10)
-            theta = math.atan2(y, x)
-            return ((math.sin(theta) + math.cos(r)) / r,
-                    (math.cos(theta) - math.sin(r)) / r)
-        return spiral
-    elif variation_name == 'hyperbolic':
-        def hyperbolic(x, y):
-            r2 = x*x + y*y + 1e-10
-            return (x / r2, math.atan2(y, x) / math.pi)
-        return hyperbolic
-    elif variation_name == 'diamond':
-        def diamond(x, y):
-            r = math.sqrt(x*x + y*y + 1e-10)
-            return (math.sin(x) * math.cos(r), math.cos(y) * math.sin(r))
-        return diamond
-    elif variation_name == 'ex':
-        def ex(x, y):
-            r = math.sqrt(x*x + y*y + 1e-10)
-            n0 = math.atan2(y, x)
-            return (r * math.sin(n0 + r), r * math.cos(n0 - r))
-        return ex
-    elif variation_name == 'julian':
-        def julian(x, y):
-            r = math.sqrt(x*x + y*y + 1e-10)
-            theta = math.atan2(y, x)
-            return (r**0.5 * math.cos(theta/3), r**0.5 * math.sin(theta/3))
-        return julian
+    if transforms_json:
+        data = json.loads(transforms_json)
+        for t_data in data:
+            transforms.append({
+                'func': build_tree_from_dict(t_data['function_tree']),
+                'scale': t_data['scale'],
+                'shift': complex(t_data['shift']['re'], t_data['shift']['im']),
+                'color': tuple(t_data['color'])
+            })
     else:
-        return lambda x, y: (x, y)
+        for _ in range(num_transforms):
+            func_tree = generate_random_function(max_depth)
+            scale = random.uniform(0.6, 0.9)
+            shift = complex(random.uniform(-0.5, 0.5), random.uniform(-0.5, 0.5))
+            color = (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255))
+            transforms.append({'func': func_tree, 'scale': scale, 'shift': shift, 'color': color})
 
+    # Chaos Game
+    N = num_points
+    
+    # КРУГЛОЕ начальное распределение вместо квадратного
+    radius = np.sqrt(np.random.uniform(0, 1, N))
+    angle = np.random.uniform(0, 2 * np.pi, N)
+    Z = radius * np.cos(angle) + 1j * radius * np.sin(angle)
+    
+    hist = np.zeros((height, width), dtype=float)
+    color_hist = np.zeros((height, width, 3), dtype=float)
+    
+    scale_x = width / 4.0
+    scale_y = height / 4.0
 
-def _generate_random_palette():
-    """Генерирует случайную цветовую палитру из 256 цветов"""
-    palette = []
-    
-    # Выбираем 3-5 опорных цветов
-    num_keyframes = random.randint(3, 5)
-    keyframes = []
-    for _ in range(num_keyframes):
-        keyframes.append((
-            random.randint(50, 255),
-            random.randint(50, 255),
-            random.randint(50, 255)
-        ))
-    
-    # Интерполируем между опорными цветами
-    for i in range(256):
-        t = i / 255.0
-        idx = t * (num_keyframes - 1)
-        idx_int = int(idx)
-        idx_frac = idx - idx_int
+    # Burn-in: первые итерации не рендерим, чтобы точки "забыли" начальное распределение
+    for _ in range(burn_in):
+        indices = np.random.randint(0, len(transforms), N)
+        new_Z = np.zeros_like(Z)
         
-        if idx_int >= num_keyframes - 1:
-            palette.append(keyframes[-1])
-        else:
-            c1 = keyframes[idx_int]
-            c2 = keyframes[idx_int + 1]
-            
-            # Плавная интерполяция
-            r = int(c1[0] * (1 - idx_frac) + c2[0] * idx_frac)
-            g = int(c1[1] * (1 - idx_frac) + c2[1] * idx_frac)
-            b = int(c1[2] * (1 - idx_frac) + c2[2] * idx_frac)
-            
-            palette.append((r, g, b))
-    
-    return palette
+        for i, t in enumerate(transforms):
+            mask = (indices == i)
+            if np.any(mask):
+                z_subset = Z[mask]
+                new_Z[mask] = t['func'].evaluate(z_subset) * t['scale'] + t['shift']
+        
+        Z = new_Z
 
+    # Основные итерации с рендерингом
+    for _ in range(iterations):
+        indices = np.random.randint(0, len(transforms), N)
+        new_Z = np.zeros_like(Z)
+        
+        for i, t in enumerate(transforms):
+            mask = (indices == i)
+            if np.any(mask):
+                z_subset = Z[mask]
+                new_Z[mask] = t['func'].evaluate(z_subset) * t['scale'] + t['shift']
+        
+        Z = new_Z
+        
+        x = (Z.real - center_x) * zoom * scale_x + width / 2
+        y = (Z.imag - center_y) * zoom * scale_y + height / 2
+        
+        valid = (x >= 0) & (x < width) & (y >= 0) & (y < height)
+        x_valid = x[valid].astype(int)
+        y_valid = y[valid].astype(int)
+        idx_valid = indices[valid]
+        
+        np.add.at(hist, (y_valid, x_valid), 1)
+        for i, t in enumerate(transforms):
+            mask = (idx_valid == i)
+            if np.any(mask):
+                color_hist[y_valid[mask], x_valid[mask]] += np.array(t['color'])
 
-def _world_to_pixel(x, y, width, height, zoom, center_x, center_y):
-    """Преобразует мировые координаты в пиксельные"""
-    # Определяем центр, если не задан
-    if center_x is None:
-        center_x = 0.0
-    if center_y is None:
-        center_y = 0.0
-    
-    # Масштабируем и центрируем
-    scale = min(width, height) / 4.0 * zoom
-    px = int((x - center_x) * scale + width / 2)
-    py = int((y - center_y) * scale + height / 2)
-    
-    return px, py
-
-
-def _apply_log_scaling(color_accum, density_accum, gamma, brightness):
-    """Применяет логарифмическое масштабирование и гамма-коррекцию"""
-    height, width = density_accum.shape
-    
-    # Находим максимум плотности
-    max_density = np.max(density_accum)
-    if max_density == 0:
-        return np.zeros((height, width, 3), dtype=np.uint8)
-    
-    # Нормализуем плотность и применяем логарифм
-    log_density = np.log(density_accum + 1) / np.log(max_density + 1)
-    
-    # Применяем гамма-коррекцию
-    log_density = np.power(log_density, 1.0 / gamma) * brightness
-    
-    # Применяем к цветам
+    # Рендеринг
     img_array = np.zeros((height, width, 3), dtype=np.uint8)
-    for c in range(3):
-        img_array[:, :, c] = np.clip(color_accum[:, :, c] * log_density, 0, 255).astype(np.uint8)
     
-    return img_array
+    log_hist = np.log1p(hist)
+    max_log = np.max(log_hist)
+    if max_log > 0:
+        norm_hist = log_hist / max_log
+    else:
+        norm_hist = log_hist
+
+    valid_pixels = hist > 0
+    if np.any(valid_pixels):
+        counts = np.maximum(hist[valid_pixels], 1)[:, np.newaxis]
+        avg_colors = color_hist[valid_pixels] / counts
+        brightness = norm_hist[valid_pixels, np.newaxis] ** 0.5
+        final_colors = (avg_colors * brightness * 255).astype(np.uint8)
+        img_array[valid_pixels] = final_colors
+
+    img = Image.fromarray(img_array, 'RGB')
+    
+    params = {
+        'num_points': num_points,
+        'iterations': iterations,
+        'burn_in': burn_in,
+        'num_transforms': num_transforms,
+        'max_depth': max_depth,
+        'zoom': zoom,
+        'center_x': center_x,
+        'center_y': center_y,
+        'transforms': [
+            {
+                'function_tree': t['func'].to_dict(),
+                'scale': t['scale'],
+                'shift': {'re': t['shift'].real, 'im': t['shift'].imag},
+                'color': t['color']
+            } for t in transforms
+        ]
+    }
+    
+    img.info['fractal_type'] = 'fractal_flame'
+    img.info['generation_params'] = json.dumps(params)
+    
+    return img

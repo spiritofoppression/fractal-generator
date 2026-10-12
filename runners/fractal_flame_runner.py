@@ -32,25 +32,20 @@ class FractalFlameRunner(BaseRunner):
     def get_random_params(self):
         """Генерирует случайные параметры для fractal flame"""
         # Адаптивное количество точек в зависимости от зума
-        zoom = random.uniform(1.0, 3.0)
+        zoom = random.uniform(0.8, 2.4)
         base_points = random.randint(500000, 1500000)
         num_points = int(base_points * (zoom ** 2))
         num_points = min(num_points, 50_000_000)  # Максимум 50M
         
         return {
-            'width': 4096,
-            'height': 4096,
-            'num_transforms': random.randint(4, 8),
-            'num_points': num_points,
-            'variations': None,
-            'color_palette': None,
-            'gamma': random.uniform(0.5, 4.0),
-            'brightness': random.uniform(0.5, 2.0),
-            'background_color': (20, 20, 20),
-            'zoom': zoom,
-            'center_x': None,
-            'center_y': None
-        }
+        "width": 4096,
+        "height": 4096,
+        "num_points": num_points,
+        "iterations": 5,
+        "num_transforms": random.randint(15, 19),
+        "max_depth": random.randint(13, 16),
+        "zoom": random.uniform(0.8, 1.5)
+    }
     
     def run(self, params, output_dir):
         type_output = os.path.join(output_dir, self.fractal_type)
