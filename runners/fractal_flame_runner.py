@@ -41,9 +41,9 @@ class FractalFlameRunner(BaseRunner):
         "width": 4096,
         "height": 4096,
         "num_points": num_points,
-        "iterations": 5,
-        "num_transforms": random.randint(15, 19),
-        "max_depth": random.randint(13, 16),
+        "iterations": random.randint(7, 17),
+        "num_transforms": random.randint(17, 29),
+        "max_depth": random.randint(16, 26),
         "zoom": random.uniform(0.8, 1.5)
     }
     
